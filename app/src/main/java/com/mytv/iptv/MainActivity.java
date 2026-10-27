@@ -22,7 +22,13 @@ import androidx.media3.exoplayer.source.DefaultMediaSourceFactory;
 import androidx.media3.ui.PlayerView;
 import java.io.*;
 import java.net.*;
+import java.security.KeyStore;
 import java.security.Security;
+import java.security.cert.CertificateFactory;
+import javax.net.ssl.HttpsURLConnection;
+import javax.net.ssl.SSLContext;
+import javax.net.ssl.TrustManagerFactory;
+import android.util.Base64;
 import java.util.*;
 
 public class MainActivity extends Activity {
@@ -55,6 +61,7 @@ public class MainActivity extends Activity {
     @Override protected void onCreate(Bundle b) {
         super.onCreate(b);
         try { Security.insertProviderAt(org.conscrypt.Conscrypt.newProvider(), 1); } catch (Throwable t) { }
+        installTrust();
         setContentView(R.layout.activity_main);
         panel = findViewById(R.id.panel);
         spinner = findViewById(R.id.spinner);
@@ -117,6 +124,50 @@ public class MainActivity extends Activity {
             return false;
         });
         showSources();
+    }
+
+    // Old TVs lack newer root certificates: trust system roots + a bundled Mozilla CA list.
+    void installTrust() {
+        try {
+            KeyStore ks = KeyStore.getInstance(KeyStore.getDefaultType());
+            ks.load(null, null);
+            try {
+                KeyStore sys = KeyStore.getInstance("AndroidCAStore");
+                sys.load(null, null);
+                for (Enumeration<String> en = sys.aliases(); en.hasMoreElements();) {
+                    String a = en.nextElement();
+                    java.security.cert.Certificate c = sys.getCertificate(a);
+                    if (c != null) ks.setCertificateEntry("s_" + a, c);
+                }
+            } catch (Exception ignored) { }
+            int id = getResources().getIdentifier("cacert", "raw", getPackageName());
+            if (id != 0) {
+                InputStream in = getResources().openRawResource(id);
+                ByteArrayOutputStream bo = new ByteArrayOutputStream();
+                byte[] buf = new byte[8192]; int n;
+                while ((n = in.read(buf)) > 0) bo.write(buf, 0, n);
+                in.close();
+                String pem = new String(bo.toByteArray(), "US-ASCII");
+                String B = "-----BEGIN CERTIFICATE-----", E = "-----END CERTIFICATE-----";
+                CertificateFactory cf = CertificateFactory.getInstance("X.509");
+                int pos = 0, i = 0;
+                while (true) {
+                    int s = pem.indexOf(B, pos); if (s < 0) break;
+                    int e = pem.indexOf(E, s); if (e < 0) break;
+                    String b64 = pem.substring(s + B.length(), e).replaceAll("\\s", "");
+                    pos = e + E.length();
+                    try {
+                        ks.setCertificateEntry("b_" + (i++), cf.generateCertificate(
+                            new ByteArrayInputStream(Base64.decode(b64, Base64.DEFAULT))));
+                    } catch (Exception ignored) { }
+                }
+            }
+            TrustManagerFactory tmf = TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm());
+            tmf.init(ks);
+            SSLContext ctx = SSLContext.getInstance("TLS");
+            ctx.init(null, tmf.getTrustManagers(), null);
+            HttpsURLConnection.setDefaultSSLSocketFactory(ctx.getSocketFactory());
+        } catch (Throwable ignored) { }
     }
 
     void showSources() {
