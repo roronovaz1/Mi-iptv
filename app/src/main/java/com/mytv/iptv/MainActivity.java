@@ -2,6 +2,7 @@ package com.mytv.iptv;
 
 import android.app.Activity;
 import android.graphics.drawable.GradientDrawable;
+import android.content.SharedPreferences;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
@@ -17,6 +18,8 @@ import androidx.media3.common.MediaItem;
 import androidx.media3.common.PlaybackException;
 import androidx.media3.common.Player;
 import androidx.media3.datasource.DefaultHttpDataSource;
+import androidx.media3.exoplayer.DefaultLoadControl;
+import androidx.media3.exoplayer.DefaultRenderersFactory;
 import androidx.media3.exoplayer.ExoPlayer;
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory;
 import androidx.media3.ui.PlayerView;
@@ -61,6 +64,7 @@ public class MainActivity extends Activity {
     @Override protected void onCreate(Bundle b) {
         super.onCreate(b);
         try { Security.insertProviderAt(org.conscrypt.Conscrypt.newProvider(), 1); } catch (Throwable t) { }
+        installCrashLog();
         installTrust();
         setContentView(R.layout.activity_main);
         panel = findViewById(R.id.panel);
@@ -95,7 +99,16 @@ public class MainActivity extends Activity {
 
         DefaultHttpDataSource.Factory f = new DefaultHttpDataSource.Factory().setUserAgent(UA)
             .setAllowCrossProtocolRedirects(true).setConnectTimeoutMs(12000).setReadTimeoutMs(12000);
-        player = new ExoPlayer.Builder(this).setMediaSourceFactory(new DefaultMediaSourceFactory(f)).build();
+        // Gentle settings for a low-memory 2017 TV: small buffers, max 720p, decoder fallback
+        DefaultLoadControl lc = new DefaultLoadControl.Builder()
+            .setBufferDurationsMs(5000, 15000, 1500, 3000)
+            .setTargetBufferBytes(8 * 1024 * 1024)
+            .setPrioritizeTimeOverSizeThresholds(false).build();
+        DefaultRenderersFactory rf = new DefaultRenderersFactory(this).setEnableDecoderFallback(true);
+        player = new ExoPlayer.Builder(this, rf).setLoadControl(lc)
+            .setMediaSourceFactory(new DefaultMediaSourceFactory(f)).build();
+        player.setTrackSelectionParameters(player.getTrackSelectionParameters().buildUpon()
+            .setMaxVideoSize(1280, 720).setMaxVideoBitrate(2500000).build());
         ((PlayerView) findViewById(R.id.player)).setPlayer(player);
         player.addListener(new Player.Listener() {
             @Override public void onPlaybackStateChanged(int s) {
@@ -124,6 +137,48 @@ public class MainActivity extends Activity {
             return false;
         });
         showSources();
+        String c = readCrashInfo();
+        if (c != null) sub.setText(c);
+    }
+
+    // ---- crash diagnostics: shows what happened last time the app died ----
+    void installCrashLog() {
+        final File f = new File(getFilesDir(), "crash.txt");
+        final Thread.UncaughtExceptionHandler old = Thread.getDefaultUncaughtExceptionHandler();
+        Thread.setDefaultUncaughtExceptionHandler((t, e) -> {
+            try {
+                StringWriter sw = new StringWriter();
+                e.printStackTrace(new PrintWriter(sw));
+                FileWriter w = new FileWriter(f);
+                w.write(sw.toString());
+                w.close();
+            } catch (Throwable ignored) { }
+            if (old != null) old.uncaughtException(t, e);
+        });
+    }
+
+    String readCrashInfo() {
+        StringBuilder out = new StringBuilder();
+        try {
+            File f = new File(getFilesDir(), "crash.txt");
+            if (f.exists()) {
+                BufferedReader r = new BufferedReader(new FileReader(f));
+                StringBuilder sb = new StringBuilder(); String line;
+                while ((line = r.readLine()) != null) sb.append(line).append('\n');
+                r.close(); f.delete();
+                String t = sb.toString();
+                out.append("JAVA CRASH:\n").append(t.length() > 260 ? t.substring(0, 260) : t);
+                int k = t.lastIndexOf("Caused by");
+                if (k >= 0) out.append("\n").append(t.substring(k, Math.min(k + 200, t.length())));
+            }
+        } catch (Throwable ignored) { }
+        SharedPreferences sp = getSharedPreferences("d", MODE_PRIVATE);
+        String pl = sp.getString("playing", null);
+        if (pl != null) {
+            sp.edit().remove("playing").commit();
+            if (out.length() == 0) out.append("App closed suddenly while playing:\n").append(pl);
+        }
+        return out.length() == 0 ? null : out.toString();
     }
 
     // Old TVs lack newer root certificates: trust system roots + a bundled Mozilla CA list.
@@ -254,6 +309,7 @@ public class MainActivity extends Activity {
     }
 
     void play(Row r) {
+        getSharedPreferences("d", MODE_PRIVATE).edit().putString("playing", r.name + "\n" + r.url).commit();
         player.setMediaItem(MediaItem.fromUri(r.url));
         player.prepare();
         player.setPlayWhenReady(true);
@@ -292,6 +348,9 @@ public class MainActivity extends Activity {
         return super.onKeyDown(key, e);
     }
 
-    @Override protected void onStop() { super.onStop(); player.pause(); }
+    @Override protected void onStop() {
+        super.onStop(); player.pause();
+        getSharedPreferences("d", MODE_PRIVATE).edit().remove("playing").commit();
+    }
     @Override protected void onDestroy() { super.onDestroy(); player.release(); }
 }
