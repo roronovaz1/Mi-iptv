@@ -8,6 +8,7 @@
         android:icon="@drawable/icon_middya"
         android:banner="@drawable/banner_middya"
         android:usesCleartextTraffic="true"
+        android:largeHeap="true"
         android:theme="@android:style/Theme.Material.NoActionBar">
         <activity
             android:name=".MainActivity"
